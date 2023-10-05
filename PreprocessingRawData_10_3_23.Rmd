@@ -1,0 +1,376 @@
+---
+title: "Preprocessing of Hummingbird RFID Data"
+author: "Liz Mathiasen"
+date: "2023-10-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("knitr")
+## setting working directory
+opts_knit$set(root.dir = "/Users/elizabethmathiasen/Desktop/thesis/Biometrics_Freqs")
+```
+
+
+
+## Output of this code
+
+The output of the following code will be two wide datasets formed from a long dataset and a biometrics dataset. 
+
+The long dataset is chronological detections of microchipped hummingbirds at two different locations in California. Winters, CA is referred to in the "Site" column as "SB", for Stevenson Bridge. Beverly Hills, CA is referred to in the "Site" column as "BH". 
+
+This code will take a subset of the overall data, which spans both sites. For computational ease,
+only the year 2020 from the SB site will be used for this transformation. 
+
+Once the transformation is finished, there will be two wide datasets. Both consist of columns labeled V1-Vn. Each column represents a datetime stamp. For the first dataset, each observation for each ID in the leftmost column will be the elapsed time between subsequent visits to the feeder. For the second dataset, each observation for each ID in the leftmost column will be the station where the observation occurred. If there is no observation at that timestamp, the letter "A" for Absent will be filled in. 
+
+## Load the libraries and the datasets
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(stringr)
+library(lubridate)
+```
+
+
+
+Load the data
+
+```{r}
+#load the long data of raw observations
+rawdetects <- read.csv("Preprocessed_RFID_reads_SB-BH.csv")
+
+#load the biometrics dataset to be merged with the observation data
+# removing NAs in the Age column, deselecting certain columns, and making a datetime column
+biometrics <- read.csv("Biometrics_2023-03-20.csv")%>% 
+  filter(!is.na(Age)) %>%
+  select(-c(Tail_Length:Primary_Molt_Code,Band, Mass)) %>% 
+  mutate(DT = as_datetime(paste(Date, Time)),
+         Date_Tagged = Date, .before = Date)
+```
+
+
+Make sure both dataframes loaded
+
+```{r}
+View(rawdetects)
+View(biometrics)
+```
+
+
+Look at the summary of the df dataframe to see if the date columns are formatted correctly
+
+```{r}
+summary(rawdetects)
+```
+
+It is not formatted correctly. We will fix this soon.
+
+First we will refine the rawdetects a bit. This code gets rid of NAs in the Station column, gets rid of station B4 altogether (it was never used), gets rid of NAs in teh Date and time columns, and changes the time column to a time format. Then it creates a DT column (datetime column) using the mutate function. Finally, it gets rid of a couple of unnecessary columns (Activity and Message)
+
+```{r}
+
+detects <- rawdetects %>% 
+  filter(!is.na(Station), Station != "B4", !is.na(Date), !is.na(Time), !str_detect(Time, "99")) %>% 
+  mutate(DT = as_datetime(paste(Date, Time))) %>% 
+  select(-c(Activity,Message)) 
+```
+
+
+A little more cleaning up
+
+```{r}
+#change some columns to the proper format
+detects$Date <- as.POSIXlt(detects$Date) #change Date column to proper forma
+detects$DT <- as_datetime(detects$DT) #format DT column
+detects$Date_Tagged <- as.POSIXlt(detects$Date_Tagged) #format Date_tagged column
+
+#change the column name in this code as needed 
+class(detects$Date_Tagged) #check to see the class of each column that has been changed
+```
+
+
+Do the same for the biometrics dataset
+
+```{r}
+biometrics$Date_Tagged <- as.POSIXlt(biometrics$Date_Tagged)
+biometrics$Date <- as.POSIXlt(biometrics$Date)
+```
+
+```{r}
+ #check to see if the class was changed in the Date_Tagged and Date columns in biometrics
+class(biometrics$Date)
+```
+
+
+Now we will create an event history dataset out of the biometrics and detects datasets.
+
+This code uses the biometrics and detects datasets and binds them together. Then it relocates columns in the order we want them to be in . 
+
+```{r}
+#bind biometrics and detects together and rearrange the columns
+event_hist <- bind_rows(biometrics, detects) %>% 
+  relocate(Site, Station, DT, Date, Time, Genus, Species, Sex, Age, RFID_hex, Date_Tagged, Latitude, Longitude) 
+
+```
+
+
+# Correction of ages
+
+One of the problems with the biometrics dataset is that some individuals are tagged as "HY" or "hatch year" and some are tagged as "AHY" or "after hatch year" in the age column. When we bind the two datasets together, all the HY birds are continously labeled as HY in subsequent years following their initial tagging. Obviously, they are no longer hatch years. However, since we are only using one year of data, we will correct for this by simply getting rid of individuals that are detected in subsequent years. 
+
+
+The diff_years column will take the difference between the date_tagged year and the current detection instance, and if it is greater than 1, it will get rid of those rows. 
+
+```{r}
+#make a diff_years column so that we only have detections of birds in the same year
+event_hist$diff_years <- as.numeric(years(event_hist$DT)) - as.numeric(years(event_hist$Date_Tagged))
+View(event_hist)
+
+```
+Save this to a new dataframe that indicates that the ages have been corrected
+```{r}
+event_hist_age_corrected <- event_hist %>%
+  distinct(.keep_all = TRUE)
+```
+Remove all rows where diff_years > 0 
+this will give us all the correct ages and now we can just use the year 2020 for the model
+```{r}
+current_year <- event_hist[event_hist$diff_years < 1,]
+
+View(current_year)
+```
+
+#  Subset the year 2020 for BH and SB
+
+Now that we have corrected for age, we will subset the dataframes so that we can just use the year 2020 from each site for our transformation. 
+
+```{r}
+SB <- current_year[current_year$Site == 'SB',] #subset just SB
+BH <- current_year[current_year$Site == 'BH',] #subset just BH
+
+SB_2020 <- SB[SB$Date >= '2020-01-01' & SB$Date <= "2020-12-31",] #subset the year 2020
+BH_2020 <- BH[BH$Date >= '2020-01-01' & BH$Date <= "2020-12-31",] #subset the year 2020
+
+```
+
+# Make a wide dataset with time elapsed between detections as the observations
+
+This dataset will have columns, labeled V1-Vn, and each column will represent a datetime. 
+
+Each observation for each ID in the left column will indicate the time elapsed since the last detection
+
+Change the datetime column if it isn't formatted correctly already. 
+```{r}
+data_1 <-  SB_2020%>% 
+  mutate(DateTime = as.POSIXct(paste(Date, Time), format = "%Y-%m-%d %H:%M:%S"))
+View(data_1)
+```
+
+Sort the data by ID and datetime
+
+```{r}
+data_2 <- data_1 %>%
+  arrange(RFID_hex, DateTime)
+```
+
+
+Calculate the elapsed time between visits. Make a TimeElapsed column.
+
+```{r}
+data_2 <- data_1 %>%
+  group_by(RFID_hex) %>%
+  mutate(TimeElapsed = as.numeric(DateTime - lag(DateTime, default = first(DateTime))))
+```
+
+Create a unique identifier for each ID. This changes the datetimes in the column headers to V1, V2, V3... etc.
+
+```{r}
+data_3 <- data_2 %>%
+  group_by(RFID_hex) %>%
+  mutate(ColumnID = paste0("V", row_number())) %>%
+  ungroup()
+```
+
+Collapse the dataset to just the columns we want. 
+```{r}
+data_4 <- data_3 %>% select(RFID_hex, ColumnID, TimeElapsed)
+```
+
+
+Make the wide dataset. Use pivot_wider to transform the dataset
+
+```{r}
+wide_data <- data_4 %>%
+  pivot_wider(names_from = ColumnID, values_from = TimeElapsed)
+```
+Make all the NA values be 0
+
+```{r}
+wide_data[sapply(wide_data, is.numeric)][is.na(wide_data[sapply(wide_data, is.numeric)])] <- 0
+```
+
+View it.
+
+```{r}
+View(wide_data)
+```
+
+
+Write it to a .csv file.
+
+```{r}
+write.csv(wide_data2, "wide_data_time_elapsed_SB_2020.csv")
+```
+
+
+# Make a wide dataframe of detection stations 
+
+Now we must do the same transformation, but with stations as observations instead of time elapsed. 
+
+```{r}
+data2 <-  SB_2020%>% 
+  mutate(DateTime = as.POSIXct(paste(Date, Time), format = "%Y-%m-%d %H:%M:%S"))
+
+data3 <- data2 %>%
+  arrange(RFID_hex, DateTime)
+
+data4 <- data3 %>%
+  group_by(RFID_hex) %>%
+  mutate(StationDetect = Station)
+
+# Create a unique identifier for each ID
+data5 <- data4 %>%
+  group_by(RFID_hex) %>%
+  mutate(ColumnID = paste0("V", row_number())) %>%
+  ungroup()
+
+# Select only the relevant columns (ColumnID and TimeElapsed)
+data6 <- data5 %>% select(RFID_hex, ColumnID, StationDetect)
+
+# Reshape the data from long to wide format
+wide_data2 <- data6 %>%
+  pivot_wider(names_from = ColumnID, values_from = StationDetect)
+
+# Replace NA values with zeros
+wide_data2[is.na(wide_data2)] <- 'A'
+
+
+View(wide_data2)
+```
+
+Write it to a .csv file
+
+```{r}
+write.csv(wide_data2, "wide_data_station_SB_2020.csv")
+```
+
+
+
+# The same now must be done for the BH_2020 dataset
+
+
+Change the datetime column if it isn't formatted correctly already. 
+```{r}
+data_1 <-  BH_2020%>% 
+  mutate(DateTime = as.POSIXct(paste(Date, Time), format = "%Y-%m-%d %H:%M:%S"))
+View(data_1)
+```
+
+Sort the data by ID and datetime
+
+```{r}
+data_2 <- data_1 %>%
+  arrange(RFID_hex, DateTime)
+```
+
+
+Calculate the elapsed time between visits. Make a TimeElapsed column.
+
+```{r}
+data_2 <- data_1 %>%
+  group_by(RFID_hex) %>%
+  mutate(TimeElapsed = as.numeric(DateTime - lag(DateTime, default = first(DateTime))))
+```
+
+Create a unique identifier for each ID. This changes the datetimes in the column headers to V1, V2, V3... etc.
+
+```{r}
+data_3 <- data_2 %>%
+  group_by(RFID_hex) %>%
+  mutate(ColumnID = paste0("V", row_number())) %>%
+  ungroup()
+```
+
+Collapse the dataset to just the columns we want. 
+```{r}
+data_4 <- data_3 %>% select(RFID_hex, ColumnID, TimeElapsed)
+```
+
+
+Make the wide dataset. Use pivot_wider to transform the dataset
+
+```{r}
+wide_data <- data_4 %>%
+  pivot_wider(names_from = ColumnID, values_from = TimeElapsed)
+```
+Make all the NA values be 0
+
+```{r}
+wide_data[sapply(wide_data, is.numeric)][is.na(wide_data[sapply(wide_data, is.numeric)])] <- 0
+```
+
+View it.
+
+```{r}
+View(wide_data)
+```
+
+
+```{r}
+write.csv(wide_data2, "wide_data_time_elapsed_BH_2020.csv")
+```
+
+
+# Now create the wide stations dataset for Beverly Hills
+
+```{r}
+data2 <-  BH_2020%>% 
+  mutate(DateTime = as.POSIXct(paste(Date, Time), format = "%Y-%m-%d %H:%M:%S"))
+
+data3 <- data2 %>%
+  arrange(RFID_hex, DateTime)
+
+data4 <- data3 %>%
+  group_by(RFID_hex) %>%
+  mutate(StationDetect = Station)
+
+# Create a unique identifier for each ID
+data5 <- data4 %>%
+  group_by(RFID_hex) %>%
+  mutate(ColumnID = paste0("V", row_number())) %>%
+  ungroup()
+
+# Select only the relevant columns (ColumnID and TimeElapsed)
+data6 <- data5 %>% select(RFID_hex, ColumnID, StationDetect)
+
+# Reshape the data from long to wide format
+wide_data2 <- data6 %>%
+  pivot_wider(names_from = ColumnID, values_from = StationDetect)
+
+# Replace NA values with zeros
+wide_data2[is.na(wide_data2)] <- 'A'
+
+
+View(wide_data2)
+```
+
+Write it to a .csv file
+
+```{r}
+write.csv(wide_data2, "wide_data_station_BH_2020.csv")
+```
